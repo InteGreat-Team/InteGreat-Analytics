@@ -1,51 +1,141 @@
 
-# Welcome to your CDK Python project!
+# INTEGREAT ANALYTICS AS A SERVICE
 
-This is a blank project for CDK development with Python.
+A multi-tenant serverless analytics platform built using AWS CDK (Python),
+with isolated Lambda functions per application (Campus, Teleo, Pillars, EventGarde),
+and a centralized ETL pipeline under Integreat that transforms data from NeonDB
+into tenant-specific S3 buckets for use in Power BI.
 
-The `cdk.json` file tells the CDK Toolkit how to execute your app.
+---
 
-This project is set up like a standard Python project.  The initialization
-process also creates a virtualenv within this project, stored under the `.venv`
-directory.  To create the virtualenv it assumes that there is a `python3`
-(or `python` for Windows) executable in your path with access to the `venv`
-package. If for any reason the automatic creation of the virtualenv fails,
-you can create the virtualenv manually.
+## 📑 Table of Contents
 
-To manually create a virtualenv on MacOS and Linux:
+* [Project Structure](#project-structure)
+* [Installation](#installation)
+* [Usage](#usage)
+* [Deployment](#deployment)
+* [Testing](#testing)
+* [Development Notes](#development-notes)
 
+---
+
+## 📁 Project Structure
+
+```bash
+INTEGREAT-ANALYTICS/
+├── app.py                     # CDK entrypoint to deploy all stacks
+├── cdk.json                   # CDK context configuration file
+├── requirements.txt           # CDK runtime dependencies
+├── requirements-dev.txt       # Dev/test/lint dependencies
+├── source.bat                 # Windows helper script for venv activation + install
+├── README.md                  # This file
+
+├── integreat_analytics/       # CDK stack definitions
+│   ├── __init__.py
+│   ├── tenant_lambda_stack.py # Defines per-tenant Lambda functions
+│   └── eventbridge_stack.py   # Defines shared EventBridge scheduler
+
+├── scripts/                   # Python code executed by each Lambda
+│   ├── campus/                # Campus tenant Lambda
+│   ├── teleo/                 # Teleo tenant Lambda
+│   ├── pillars/               # Pillars tenant Lambda
+│   ├── evntgarde/             # EventGarde tenant Lambda
+│   └── integreat/             # Shared DW ETL pipeline: etl, marts, csv upload
+
+├── tests/                     # Unit tests for CDK stacks or Python logic
+│   └── unit/                  # Sample and infra-related tests
+│       └── __init__.py
 ```
-$ python -m venv .venv
+
+---
+
+## ⚙️ Installation
+
+Follow these steps to install and prepare the environment.
+
+### 1. Clone the Repository
+
+```bash
+git clone https://github.com/InteGreat-Team/InteGreat-Analytics.git
+cd integreat-analytics
 ```
 
-After the init process completes and the virtualenv is created, you can use the following
-step to activate your virtualenv.
+### 2. Create and Activate a Virtual Environment
 
-```
-$ source .venv/bin/activate
-```
+```bash
+# Create venv (if not yet created)
+python -m venv .venv
 
-If you are a Windows platform, you would activate the virtualenv like this:
+# Activate it
+# On Windows:
+source.bat
 
-```
-% .venv\Scripts\activate.bat
-```
-
-Once the virtualenv is activated, you can install the required dependencies.
-
-```
-$ pip install -r requirements.txt
+# On macOS/Linux:
+source .venv/bin/activate
 ```
 
-At this point you can now synthesize the CloudFormation template for this code.
+### 3. Install Required Packages
 
-```
-$ cdk synth
+```bash
+# Runtime requirements
+py -m pip install -r requirements.txt
+
+# Development/test requirements
+py -m pip install -r requirements-dev.txt
 ```
 
-To add additional dependencies, for example other CDK libraries, just add
-them to your `setup.py` file and rerun the `pip install -r requirements.txt`
-command.
+> **Note:** Using `py -m pip` is recommended to avoid `pip: command not found` errors on Windows.
+
+---
+
+## 🚀 Usage
+
+### Synth the CDK App
+
+```bash
+cdk synth
+```
+
+### Deploy All Stacks
+
+```bash
+cdk deploy --all
+```
+
+This will deploy:
+
+* A Lambda for each tenant under `scripts/<tenant>`
+* A single EventBridge rule that triggers all of them at 12MN (GMT+8)
+* The shared Integreat DW ETL Lambda
+
+---
+
+## 🧪 Testing
+
+Run tests using:
+
+```bash
+pytest
+```
+
+Optional test config lives in `pytest.ini`.
+
+---
+
+## 🛠 Development Notes
+
+* Each tenant Lambda handles its own data export logic.
+* Integreat handles:
+
+  * Extracting from NeonDB OLTP
+  * Transforming into OLAP fact/dim tables
+  * Creating materialized views (data marts)
+  * Uploading per-tenant CSVs to S3
+* All context values (e.g., bucket names) are passed via `cdk.context.json`
+* No secrets manager is used; no JWTs are required for backend Lambdas.
+* S3 access and Cognito roles are provisioned separately in a Node.js CDK stack.
+
+---
 
 ## Useful commands
 
@@ -54,5 +144,3 @@ command.
  * `cdk deploy`      deploy this stack to your default AWS account/region
  * `cdk diff`        compare deployed stack with current state
  * `cdk docs`        open CDK documentation
-
-Enjoy!

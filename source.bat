@@ -1,13 +1,26 @@
 @echo off
+setlocal
 
-rem The sole purpose of this script is to make the command
-rem
-rem     source .venv/bin/activate
-rem
-rem (which activates a Python virtualenv on Linux or Mac OS X) work on Windows.
-rem On Windows, this command just runs this batch file (the argument is ignored).
-rem
-rem Now we don't need to document a Windows command for activating a virtualenv.
+rem === Virtual Environment Activation Script for Windows ===
 
-echo Executing .venv\Scripts\activate.bat for you
-.venv\Scripts\activate.bat
+if not exist ".venv\Scripts\activate.bat" (
+    echo [ERROR] .venv not found. Run "python -m venv .venv" first.
+    exit /b 1
+)
+
+echo [INFO] Activating virtual environment...
+call .venv\Scripts\activate.bat
+
+rem === Install dependencies automatically ===
+if exist requirements.txt (
+    echo [INFO] Installing runtime requirements...
+    pip install -r requirements.txt
+)
+
+if exist requirements-dev.txt (
+    echo [INFO] Installing development requirements...
+    pip install -r requirements-dev.txt
+)
+
+echo [SUCCESS] Environment is ready!
+endlocal
