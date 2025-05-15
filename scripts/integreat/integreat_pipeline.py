@@ -26,6 +26,7 @@ Step 3: Export CSVs & upload to S3
           – time-dim-YYYY-MM-DD.csv
           – mart-<tenant>-YYYY-MM-DD.csv
       • Upload each CSV to that tenant’s preconfigured S3 bucket
+      • Track dimension table changes with etl.export_metadata to record when dimension values change
 
 Assumptions:
   - Tenant bucket names and connection credentials are pre-configured
@@ -71,12 +72,11 @@ def define_tables():
     dim_time = Table(
         "dim_time", meta_olap,
         Column("time_id",   Integer, primary_key=True),
-        Column("timestamp", TIMESTAMP, nullable=False),
         Column("hour",      Integer,   nullable=False),
         Column("day",       Integer,   nullable=False),
         Column("month",     Integer,   nullable=False),
         Column("year",      Integer,   nullable=False),
-        UniqueConstraint("timestamp","hour","day","month","year", name="uq_dim_time")
+        UniqueConstraint("hour","day","month","year", name="uq_dim_time")
     )
 
     dim_loc = Table(
@@ -121,6 +121,7 @@ def define_tables():
         Column("location_id",          Integer, ForeignKey("OLAP.dim_location.location_id"), nullable=False),
         Column("user_id",              Integer, ForeignKey("OLAP.dim_user.user_id"), nullable=False),
         Column("service_id",           Integer, ForeignKey("OLAP.dim_service.service_id"), nullable=False),
+        Column("created_at",           TIMESTAMP, nullable=False),
         Column("request_method",       String(20)),
         Column("request_url",          Text),
         Column("request_headers",      Text),
@@ -159,9 +160,8 @@ def etl(date_str):
 
     # 1) Upsert dim_time
     time_stmt = pg_insert(dim_time).from_select(
-        ["timestamp","hour","day","month","year"],
+        ["hour","day","month","year"],
         select(
-            src.c.created_at.label("timestamp"),
             func.date_part("hour",  src.c.created_at).cast(Integer).label("hour"),
             func.date_part("day",   src.c.created_at).cast(Integer).label("day"),
             func.date_part("month", src.c.created_at).cast(Integer).label("month"),
@@ -218,6 +218,11 @@ def etl(date_str):
     ).on_conflict_do_nothing(constraint="uq_dim_service")
 
     # 6) Build and execute fact INSERT…SELECT
+    hour_part  = func.date_part("hour",  src.c.created_at).cast(Integer)
+    day_part   = func.date_part("day",   src.c.created_at).cast(Integer)
+    month_part = func.date_part("month", src.c.created_at).cast(Integer)
+    year_part  = func.date_part("year",  src.c.created_at).cast(Integer)
+
     fact_select = (
         select(
             src.c.log_id,
@@ -225,6 +230,7 @@ def etl(date_str):
             dim_loc.c.location_id,
             dim_user.c.user_id,
             dim_svc.c.service_id,
+            src.c.created_at,
             src.c.request_method,
             src.c.request_url,
             src.c.request_headers,
@@ -236,30 +242,46 @@ def etl(date_str):
         )
         .select_from(
             src
-            .join(dim_time, func.date_trunc("second", src.c.created_at) == dim_time.c.timestamp)
-            .join(dim_loc,  (src.c.country   == dim_loc.c.country)  &
-                            (src.c.region    == dim_loc.c.region)   &
-                            (src.c.city      == dim_loc.c.city)     &
-                            (src.c.zip_code  == dim_loc.c.zip_code) &
-                            (src.c.latitude  == dim_loc.c.latitude) &
-                            (src.c.longitude == dim_loc.c.longitude))
-            .join(dim_user, (role_valid   == dim_user.c.role)   &
-                            (origin_norm  == dim_user.c.origin))
-            .join(dim_svc,  (src.c.destination == dim_svc.c.destination) &
-                            (src.c.api_version  == dim_svc.c.api_version)  &
-                            (svc_type           == dim_svc.c.service_type))
+            .join(
+                dim_time,
+                (hour_part  == dim_time.c.hour)  &
+                (day_part   == dim_time.c.day)   &
+                (month_part == dim_time.c.month) &
+                (year_part  == dim_time.c.year)
+            )
+            .join(
+                dim_loc,
+                (src.c.country   == dim_loc.c.country)  &
+                (src.c.region    == dim_loc.c.region)   &
+                (src.c.city      == dim_loc.c.city)     &
+                (src.c.zip_code  == dim_loc.c.zip_code) &
+                (src.c.latitude  == dim_loc.c.latitude) &
+                (src.c.longitude == dim_loc.c.longitude)
+            )
+            .join(
+                dim_user,
+                (role_valid  == dim_user.c.role) &
+                (origin_norm == dim_user.c.origin)
+            )
+            .join(
+                dim_svc,
+                (src.c.destination == dim_svc.c.destination) &
+                (src.c.api_version  == dim_svc.c.api_version) &
+                (svc_type           == dim_svc.c.service_type)
+            )
         )
         .where(date_filter)
     )
 
     fact_stmt = pg_insert(fact).from_select(
         [
-            "log_id","time_id","location_id","user_id","service_id",
-            "request_method","request_url","request_headers","request_body",
-            "response_status_code","response_body","execution_time_ms","error_message"
+            "log_id", "time_id", "location_id", "user_id", "service_id", "created_at",
+            "request_method", "request_url", "request_headers", "request_body",
+            "response_status_code", "response_body", "execution_time_ms", "error_message"
         ],
         fact_select
     ).on_conflict_do_nothing(index_elements=["log_id"])
+
 
     with engine.begin() as conn:
         conn.execute(time_stmt)
