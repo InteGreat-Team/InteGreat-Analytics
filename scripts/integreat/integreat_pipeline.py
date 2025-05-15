@@ -354,7 +354,6 @@ def create_data_marts(date_str: str):
         print(f"[mart] {t}: inserted {cnt}")
     with ThreadPoolExecutor(max_workers=4) as ex:
         ex.map(_task, MART_TABLES)
-#STEP 3 - UPLOAD TO S3:
 
 #MAIN ENTRY
 def main(date_override: str = None):
