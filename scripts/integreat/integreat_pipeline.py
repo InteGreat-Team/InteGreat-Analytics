@@ -116,7 +116,7 @@ def define_tables():
 
     fact = Table(
         "fact_log_transactions", meta_olap,
-        Column("log_id",               String(100), primary_key=True),
+        Column("log_id",               Integer, primary_key=True),
         Column("time_id",              Integer, ForeignKey("OLAP.dim_time.time_id"), nullable=False),
         Column("location_id",          Integer, ForeignKey("OLAP.dim_location.location_id"), nullable=False),
         Column("user_id",              Integer, ForeignKey("OLAP.dim_user.user_id"), nullable=False),
