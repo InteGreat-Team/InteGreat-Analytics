@@ -1,63 +1,81 @@
-"""
-integreat_pipeline.py
-
-Full Integreat analytics ETL pipeline, all in one:
-
-Step 1: ETL to OLAP star schema
-  - Connect to Integreat’s NeonDB instance (OLTP.schema: api_transaction)
-  - Load raw API transaction data into a centralized OLAP schema using a star design:
-      • Dimension tables (time, location, user, service)
-      • Fact table (fact_log_transactions)
-  - Use timestamp-based filtering for incremental (“yesterday”) loads
-
-Step 2: Build per-tenant flat tables (“data marts”)
-  - Instead of materialized views, generate or replace a flat table in the OLAP schema
-    for each tenant containing that tenant’s slice of the fact + dimensions:
-      • mart_<tenant> (flat table)
-      • Columns include all relevant fact and dimension fields
-      • Filtered to rows where created_at ∈ [date 00:00, date+1 00:00)
-  - Ensures fast, one-step access for each tenant’s analytics
-
-Step 3: Export CSVs & upload to S3
-  - For each tenant:
-      • Query its OLAP flat table (mart_<tenant>) plus shared dimension tables as needed
-      • Write the result to `/tmp/*.csv`, using timestamped filenames:
-          – sales-fact-YYYY-MM-DD.csv
-          – time-dim-YYYY-MM-DD.csv
-          – mart-<tenant>-YYYY-MM-DD.csv
-      • Upload each CSV to that tenant’s preconfigured S3 bucket
-      • Track dimension table changes with etl.export_metadata to record when dimension values change
-
-Assumptions:
-  - Tenant bucket names and connection credentials are pre-configured
-  - All CSVs are written to `/tmp` (Lambda-compatible) before uploading
-  - This script can run locally (via `python integreat_pipeline.py [YYYY-MM-DD]`)
-    or in AWS Lambda (via `lambda_handler`) on a daily schedule at midnight Asia/Manila
-"""
 import sys
 import traceback
 from datetime import datetime, time, timezone, timedelta
 import os
-
-# PACKAGES FOR PIPELINE:
-from dotenv import load_dotenv
-from sqlalchemy import create_engine, MetaData, Table, Column, Integer, String, Float, \
-                       Text, TIMESTAMP, UniqueConstraint, ForeignKey, select, func, case, literal_column
-from sqlalchemy.dialects.postgresql import insert as pg_insert
-import boto3
 import csv
 
-# CONFIGURATION:
+from dotenv import load_dotenv
+from sqlalchemy import (
+    create_engine, MetaData, Table, Column,
+    Integer, String, Float, Text, TIMESTAMP,
+    select, func, case, literal_column, text,
+    ForeignKey, UniqueConstraint,
+)
+from sqlalchemy.dialects.postgresql import insert as pg_insert
+import boto3
+from concurrent.futures import ThreadPoolExecutor
+
 load_dotenv()
 DATABASE_URL = os.getenv("DATABASE_URL")
 if not DATABASE_URL:
     raise RuntimeError("Please set DATABASE_URL in your .env")
 
-engine = create_engine(DATABASE_URL, connect_args={"sslmode": "require"})
-
+engine = create_engine(DATABASE_URL, connect_args={"sslmode": "require"}, echo=False)
 S3 = boto3.client("s3")
 
-# TABLE DEFINITION:
+# Reflect OLAP dims & fact once
+meta_olap = MetaData(schema="OLAP")
+dim_time = Table("dim_time",            meta_olap, autoload_with=engine)
+dim_loc  = Table("dim_location",        meta_olap, autoload_with=engine)
+dim_user = Table("dim_user",            meta_olap, autoload_with=engine)
+dim_svc  = Table("dim_service",         meta_olap, autoload_with=engine)
+fact     = Table("fact_log_transactions", meta_olap, autoload_with=engine)
+
+# Define & create mart tables once (Step 2)
+meta_mart = MetaData(schema="OLAP")
+def _common_columns():
+    return [
+        Column("mart_id", Integer, primary_key=True),
+        Column("log_id", Integer, nullable=False),
+        Column("created_at", TIMESTAMP, nullable=False),
+        Column("hour", Integer, nullable=False),
+        Column("day", Integer, nullable=False),
+        Column("month", Integer, nullable=False),
+        Column("year", Integer, nullable=False),
+        Column("country", String(100), nullable=False),
+        Column("region", String(100), nullable=False),
+        Column("city", String(100), nullable=False),
+        Column("zip_code", String(20), nullable=False),
+        Column("latitude", Float, nullable=False),
+        Column("longitude", Float, nullable=False),
+        Column("role", String(100), nullable=False),
+        Column("origin", String(100), nullable=False),
+        Column("destination", String(100), nullable=False),
+        Column("api_version", String(50), nullable=False),
+        Column("service_type", String(50), nullable=False),
+        Column("request_method", String(20)),
+        Column("request_url", Text),
+        Column("request_body", Text),
+        Column("response_status_code", Integer),
+        Column("response_body", Text),
+        Column("execution_time_ms", Integer),
+        Column("error_message", Text)
+    ]
+
+mart_teleo     = Table("mart_teleo",     meta_mart, *(_common_columns()))
+mart_pillars   = Table("mart_pillars",   meta_mart, *(_common_columns()))
+mart_campus    = Table("mart_campus",    meta_mart, *(_common_columns()))
+mart_evntgarde = Table("mart_evntgarde", meta_mart, *(_common_columns()))
+meta_mart.create_all(engine)
+
+MART_TABLES = {
+    'teleo': mart_teleo,
+    'pillars': mart_pillars,
+    'campus': mart_campus,
+    'evntgarde': mart_evntgarde
+}
+
+# STEP 1 - ETL TO OLAP:
 def define_tables():
     """
     Define OLTP source and OLAP target tables with SQLAlchemy Core.
@@ -136,7 +154,6 @@ def define_tables():
     meta_olap.create_all(engine)
     return src, dim_time, dim_loc, dim_user, dim_svc, fact
 
-# STEP 1: ETL TO OLAP:
 def etl(date_str):
     """
     Perform the ETL for a single date:
@@ -291,39 +308,66 @@ def etl(date_str):
         inserted = conn.execute(fact_stmt).rowcount
         print(f"[etl] inserted {inserted} fact rows (duplicates skipped)")
 
-# STEP 2: CREATE DATA MARTS TABLES:
-# STEP 3: UPLOAD CSVs TO S3:
-# ENTRY POINT:
-def main(date_override: str = None):
-    if date_override:
-        date_str = date_override
-    else:
-        yesterday = (datetime.now(timezone.utc) - timedelta(days=1)).date()
-        date_str = yesterday.strftime("%Y-%m-%d")
+#STEP 2 - CREATE DATA MARTS:
+def _load_one_mart(date_str: str, tenant: str) -> int:
+    tenant_key = tenant.lower()
+    dt = datetime.strptime(date_str, "%Y-%m-%d").date()
+    start_dt = datetime.combine(dt, time.min)
+    end_dt = start_dt + timedelta(days=1)
 
+    sql = text(f"""
+    WITH deleted AS (
+      DELETE FROM "OLAP"."mart_{tenant_key}"
+       WHERE created_at >= :start_dt
+         AND created_at <  :end_dt
+    )
+    INSERT INTO "OLAP"."mart_{tenant_key}" (
+      log_id, created_at, hour, day, month, year,
+      country, region, city, zip_code, latitude, longitude,
+      role, origin, destination, api_version, service_type,
+      request_method, request_url, request_body,
+      response_status_code, response_body, execution_time_ms, error_message
+    )
+    SELECT
+      f.log_id, f.created_at,
+      t.hour, t.day, t.month, t.year,
+      l.country, l.region, l.city, l.zip_code, l.latitude, l.longitude,
+      u.role, u.origin, s.destination, s.api_version, s.service_type,
+      f.request_method, f.request_url, f.request_body,
+      f.response_status_code, f.response_body, f.execution_time_ms, f.error_message
+    FROM "OLAP"."fact_log_transactions" f
+      JOIN "OLAP"."dim_time"     t ON f.time_id     = t.time_id
+      JOIN "OLAP"."dim_location" l ON f.location_id = l.location_id
+      JOIN "OLAP"."dim_user"     u ON f.user_id     = u.user_id
+      JOIN "OLAP"."dim_service"  s ON f.service_id  = s.service_id
+    WHERE f.created_at >= :start_dt
+      AND f.created_at <  :end_dt
+      AND (LOWER(u.origin) = :tenant_key OR LOWER(s.destination) = :tenant_key)
+    """).bindparams(start_dt=start_dt, end_dt=end_dt, tenant_key=tenant_key)
+
+    with engine.begin() as conn:
+        return conn.execute(sql).rowcount
+
+def create_data_marts(date_str: str):
+    def _task(t):
+        cnt = _load_one_mart(date_str, t)
+        print(f"[mart] {t}: inserted {cnt}")
+    with ThreadPoolExecutor(max_workers=4) as ex:
+        ex.map(_task, MART_TABLES)
+#STEP 3 - UPLOAD TO S3:
+
+#MAIN ENTRY
+def main(date_override: str = None):
+    date_str = date_override or (datetime.now(timezone.utc) - timedelta(days=1)).strftime("%Y-%m-%d")
     print(f"[MAIN] pipeline for {date_str}")
     etl(date_str)
     create_data_marts(date_str)
-    upload_csvs_to_s3(date_str)
     print("[MAIN] done")
 
-# GUARD BLOCK:
 if __name__ == "__main__":
-    import sys, traceback
-
-    date_arg = sys.argv[1] if len(sys.argv) > 1 else None
-
+    arg = sys.argv[1] if len(sys.argv) > 1 else None
     try:
-        main(date_arg)
+        main(arg)
     except Exception:
         traceback.print_exc()
         sys.exit(1)
-
-# LAMBDA HANDLER:
-def lambda_handler(event, context):
-    try:
-        main(None)                     
-        return {"status": "success"}   
-    except Exception:
-        print("Lambda failed:", traceback.format_exc())
-        raise                          
