@@ -73,7 +73,7 @@ class TenantLambdaStack(Stack):
                 bundling={
                     'command': [
                         'bash', '-c',
-                        'pip install -r requirements-lambda.txt -t /asset-output && cp -au /asset-input/* /asset-output/'
+                        'pip install -r requirements-lambda.txt -t /asset-output && cp -au /asset-input/scripts /asset-input/integreat_analytics /asset-input/requirements-lambda.txt /asset-output/'
                     ]
                 }
             )

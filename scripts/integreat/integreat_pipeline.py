@@ -363,6 +363,14 @@ def main(date_override: str = None):
     create_data_marts(date_str)
     print("[MAIN] done")
 
+def ETL_Handler(event, context):
+    """
+    AWS Lambda handler for Integreat ETL pipeline.
+    Accepts optional 'date_str' in the event to override the date.
+    """
+    date_str = event.get('date_str') if event else None
+    main(date_str)
+
 if __name__ == "__main__":
     arg = sys.argv[1] if len(sys.argv) > 1 else None
     try:
