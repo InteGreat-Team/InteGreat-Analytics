@@ -82,7 +82,7 @@ def define_tables():
     """
     # OLTP source
     meta_src = MetaData(schema="OLTP")
-    src = Table("test_api_transactions", meta_src, autoload_with=engine)
+    src = Table("api_transactions", meta_src, autoload_with=engine)
 
     # OLAP target
     meta_olap = MetaData(schema="OLAP")
@@ -204,7 +204,11 @@ def etl(date_str):
     ).on_conflict_do_nothing(constraint="uq_dim_location")
 
     # 3) Normalize origin + validate role
-    origin_norm = func.initcap(src.c.origin).label("origin")
+    origin_norm = case(
+        (src.c.origin.is_(None), literal_column("'Unknown'")),
+        else_=func.initcap(src.c.origin)
+    ).label("origin")
+    
     role_valid = case(
         ((src.c.origin.ilike("teleo"))     & src.c.role.in_(["Normal_User","Guest","Church_Admin","Pastor"]), src.c.role),
         ((src.c.origin.ilike("campus"))    & src.c.role.in_(["Student","Professor","Admin"]),                 src.c.role),

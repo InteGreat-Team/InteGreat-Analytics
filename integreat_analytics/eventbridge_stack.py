@@ -67,7 +67,7 @@ class EventBridgeStack(Stack):
             bundling={
                 'command': [
                     'bash', '-c',
-                    'pip install -r requirements-lambda.txt -t /asset-output && cp -au /asset-input/scripts /asset-input/integreat_analytics /asset-input/requirements-lambda.txt /asset-output/'
+                    'pip install -r requirements-lambda.txt -t /asset-output && cp -au /asset-input/scripts /asset-input/integreat_analytics /asset-input/requirements-lambda.txt /asset-output/ && cp /asset-input/.env /asset-output/'
                 ]
             }
         )
